@@ -123,7 +123,11 @@ public final class ThreadPoolController {
      * if so, how many more cycles it will stay in hang resolution mode
      */
     private int hangResolutionCountdown = 0;
-    private final int hangResolutionCycles = 3;
+
+    /**
+     * The starting value for hangResolutionCountdown
+     */
+    private static final int hangResolutionCycles = 3;
 
     /**
      * The poolSize used by hang resolution to break the most recently detected hang,
@@ -144,7 +148,7 @@ public final class ThreadPoolController {
      * the controller to return to its base/default state if the workload changes to a
      * non-hanging config.
      */
-    private final int noHangCyclesThreshold = 8;
+    private static final int noHangCyclesThreshold = 8;
 
     /**
      * How far from current poolSize to consider when evaluating whether to
@@ -190,7 +194,7 @@ public final class ThreadPoolController {
      * controller will use that configured small coreThreads value as the guide for increment
      * and decrement sizes.
      */
-    private static int poolChangeBasis = NUMBER_CPUS;
+    private final int poolChangeBasis;
 
     /**
      * These variables set the poolSize thresholds at which poolIncrement and poolDecrement
@@ -580,7 +584,9 @@ public final class ThreadPoolController {
          * configured value as guidance for how large to make poolSize changes
          */
         if (coreThreads < NUMBER_CPUS * 2) {
-            poolChangeBasis = coreThreads / 2;
+            poolChangeBasis = Math.max(1, coreThreads / 2);
+        } else {
+            poolChangeBasis = NUMBER_CPUS;
         }
         /**
          * Now that poolChangeBasis is set, we can assign the poolIncrement limit values
@@ -877,11 +883,11 @@ public final class ThreadPoolController {
                 // discard invalid data (old or out-of-range) found in comparison stats
                 ThroughputDistribution priorStats = threadStats.get(priorKey);
                 distance = poolSize - priorKey.intValue();
-                if (pruneData(priorStats, forecast, distance, downwardCompareSpan)) {
-                    if (priorKey > hangBufferPoolSize) {
+                if (priorKey > hangBufferPoolSize) {
+                    inHangBuffer = false;
+                    if (pruneData(priorStats, forecast, distance, downwardCompareSpan)) {
                         threadStats.remove(priorKey);
                         pruned = true;
-                        inHangBuffer = false;
                     }
                 }
                 if (!pruned) {
@@ -922,11 +928,9 @@ public final class ThreadPoolController {
             }
 
             // lean toward shrinking if cpuUtil is high
-            if (shrinkScore < 0.5) {
+            if ((shrinkScore < 0.5) && (poolSize > hangBufferPoolSize) && (priorKey > coreThreads)) {
                 if (cpuHigh) {
-                    if ((poolSize > hangBufferPoolSize) && (priorKey > coreThreads)) {
-                        shrinkScore = (flipCoin()) ? 0.7 : shrinkScore;
-                    }
+                    shrinkScore = (flipCoin()) ? 0.7 : shrinkScore;
                 } else {
                     if (flippedCoin) {
                         // shrink more eagerly if we randomly decided not to shrink (flippedCoin) and
@@ -937,9 +941,8 @@ public final class ThreadPoolController {
                             Integer largestPoolSize = getLargestValidPoolSize(poolSize, forecast, upwardCompareSpan);
                             // only make this check if data is available well beyond compareSpan
                             if ((largestPoolSize - poolSize) > (upwardCompareSpan * compareSpanRatioMultiplier))
-                                if (poolSize > hangBufferPoolSize)
-                                    if (leanTowardShrinking(poolSize, largestPoolSize, forecast, threadStats.get(largestPoolSize).getMovingAverage()))
-                                        shrinkScore = 0.7;
+                                if (leanTowardShrinking(poolSize, largestPoolSize, forecast, threadStats.get(largestPoolSize).getMovingAverage()))
+                                    shrinkScore = 0.7;
                         } catch (Exception e) {
                             FFDCFilter.processException(e, getClass().getName(), "getShrinkScore - largestPoolSize", this);
                         }
@@ -950,9 +953,8 @@ public final class ThreadPoolController {
                             Integer smallestPoolSize = getSmallestValidPoolSize(poolSize, forecast, downwardCompareSpan);
                             // only make this check if data is available well beyond compareSpan
                             if ((poolSize - smallestPoolSize) > (downwardCompareSpan * compareSpanRatioMultiplier))
-                                if (poolSize > hangBufferPoolSize)
-                                    if (leanTowardShrinking(smallestPoolSize, poolSize, threadStats.get(smallestPoolSize).getMovingAverage(), forecast))
-                                        shrinkScore = 0.7;
+                                if (leanTowardShrinking(smallestPoolSize, poolSize, threadStats.get(smallestPoolSize).getMovingAverage(), forecast))
+                                    shrinkScore = 0.7;
                         } catch (Exception e) {
                             FFDCFilter.processException(e, getClass().getName(), "getShrinkScore - smallestPoolSize", this);
                         }
