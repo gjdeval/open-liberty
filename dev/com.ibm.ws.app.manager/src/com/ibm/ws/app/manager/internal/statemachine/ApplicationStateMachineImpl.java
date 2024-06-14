@@ -714,9 +714,12 @@ class ApplicationStateMachineImpl extends ApplicationStateMachine implements App
     private final ApplicationMonitor _appMonitor;
     private final ApplicationConfigurator _configurator;
 
+    private final ExecutorService _appStartPolicyExecutor; // gjd
+
     ApplicationStateMachineImpl(BundleContext ctx, WsLocationAdmin locAdmin, FutureMonitor futureMonitor,
                                 ArtifactContainerFactory artifactFactory, AdaptableModuleFactory moduleFactory,
                                 ExecutorService executorService, ScheduledExecutorService scheduledExecutorService,
+                                ExecutorService appStartPolicyExecutor,
                                 ApplicationStateMachine.ASMHelper asmHelper, ApplicationMonitor appMonitor,
                                 ApplicationConfigurator configurator) {
         _asmSeqNo = asmSequenceNumber.getAndIncrement();
@@ -726,6 +729,14 @@ class ApplicationStateMachineImpl extends ApplicationStateMachine implements App
         _artifactFactory = artifactFactory;
         _moduleFactory = moduleFactory;
         _executorService = executorService;
+        // gjd hack
+        if (appStartPolicyExecutor != null) {
+            _appStartPolicyExecutor = appStartPolicyExecutor;
+            System.out.println("*** gjd *** using _appStartPolicyExecutor");
+        } else {
+            _appStartPolicyExecutor = executorService;
+        }
+        // gjd hack end
         _scheduledExecutorService = scheduledExecutorService;
         _asmHelper = asmHelper;
         _appMonitor = appMonitor;
@@ -981,8 +992,15 @@ class ApplicationStateMachineImpl extends ApplicationStateMachine implements App
                 Tr.debug(_tc, asmLabel() + "queueStateChange: added action " + qa);
             }
         }
+// gjd start
+        if (action == StateChangeAction.START) {
+            _appStartPolicyExecutor.execute(this);
+            System.out.println("*** gjd *** gave StateChangeAction.START to _appStartPolicyExecutor");
+        } else {
+            _executorService.execute(this);
+        }
 
-        _executorService.execute(this);
+// gjd        _executorService.execute(this);
     }
 
     void attemptStateChange(StateChangeAction action) {

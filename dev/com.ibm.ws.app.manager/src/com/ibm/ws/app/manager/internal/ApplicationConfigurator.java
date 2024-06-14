@@ -14,6 +14,8 @@ package com.ibm.ws.app.manager.internal;
 
 import java.io.File;
 import java.io.PrintWriter;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -67,8 +69,8 @@ import com.ibm.websphere.ras.annotation.Trivial;
 import com.ibm.ws.app.manager.AppMessageHelper;
 import com.ibm.ws.app.manager.ApplicationManager;
 import com.ibm.ws.app.manager.ApplicationStateCoordinator;
-import com.ibm.ws.app.manager.CacheUtils;
 import com.ibm.ws.app.manager.ApplicationStateCoordinator.AppStatus;
+import com.ibm.ws.app.manager.CacheUtils;
 import com.ibm.ws.app.manager.internal.lifecycle.ServiceReg;
 import com.ibm.ws.app.manager.internal.monitor.AppMonitorConfigurator;
 import com.ibm.ws.app.manager.internal.statemachine.ApplicationStateMachine;
@@ -78,6 +80,8 @@ import com.ibm.ws.runtime.update.RuntimeUpdateListener;
 import com.ibm.ws.runtime.update.RuntimeUpdateManager;
 import com.ibm.ws.runtime.update.RuntimeUpdateNotification;
 import com.ibm.ws.threading.FutureMonitor;
+import com.ibm.ws.threading.PolicyExecutor.MaxPolicy;
+import com.ibm.ws.threading.PolicyExecutorProvider;
 import com.ibm.ws.threading.listeners.CompletionListener;
 import com.ibm.wsspi.adaptable.module.AdaptableModuleFactory;
 import com.ibm.wsspi.application.Application;
@@ -92,16 +96,32 @@ import com.ibm.wsspi.kernel.service.location.WsLocationAdmin;
 import com.ibm.wsspi.kernel.service.utils.FrameworkState;
 import com.ibm.wsspi.logging.Introspector;
 
-import io.openliberty.checkpoint.spi.CheckpointHook;
 import io.openliberty.checkpoint.spi.CheckpointPhase;
 
-@Component(service = { ManagedServiceFactory.class, Introspector.class, RuntimeUpdateListener.class, ApplicationRecycleCoordinator.class},
+@Component(service = { ManagedServiceFactory.class, Introspector.class, RuntimeUpdateListener.class, ApplicationRecycleCoordinator.class },
            immediate = true,
            configurationPolicy = ConfigurationPolicy.IGNORE,
            property = { Constants.SERVICE_VENDOR + "=" + "IBM",
                         Constants.SERVICE_PID + "=" + AppManagerConstants.APPLICATIONS_PID })
 public class ApplicationConfigurator implements ManagedServiceFactory, Introspector, RuntimeUpdateListener, ApplicationRecycleCoordinator {
     private static final TraceComponent _tc = Tr.register(ApplicationConfigurator.class);
+
+    // gjd
+    @Reference
+    private static PolicyExecutorProvider appManagerPolicyExecutorProvider;
+    private static ExecutorService _executorServiceAppStart = null;
+    private static int concurAppsPolicy = -1;
+
+    static {
+        String appMgrConcurAppStartsPolicy = getSystemProperty("appMgrConcurAppStartsPolicy");
+        concurAppsPolicy = (appMgrConcurAppStartsPolicy == null) ? 0 : Integer.parseInt(appMgrConcurAppStartsPolicy);
+        System.out.println("*** gjd *** ApplicationConfigurator hack: concurAppsPolicy = " + concurAppsPolicy);
+        if (concurAppsPolicy > 0) {
+            _executorServiceAppStart = appManagerPolicyExecutorProvider.create("AppMgrConcurrentPolicy").maxConcurrency(concurAppsPolicy).maxQueueSize(2000).maxPolicy(MaxPolicy.strict);
+            System.out.println("*** gjd *** initialized _executorServiceAppStart: " + _executorServiceAppStart.toString());
+        }
+    }
+    // gjd end
 
     /**
      * An instance of this class exists for each running application
@@ -589,7 +609,6 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
         }
     }
 
-    
     protected void unsetServerStarted(ServerStarted serverStarted) {
         // do nothing
     }
@@ -1072,7 +1091,7 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
     private ApplicationStateMachine createStateMachine(NamedApplication app) {
         ApplicationStateMachine asm = ApplicationStateMachine.newInstance(_ctx, _locAdmin, _futureMonitor,
                                                                           _artifactFactory, _moduleFactory,
-                                                                          _executor, _scheduledExecutor,
+                                                                          _executor, _scheduledExecutor, _executorServiceAppStart,
                                                                           app, _appMonitorConfigurator.getMonitor(),
                                                                           this);
         app.setStateMachine(asm);
@@ -1089,7 +1108,7 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
 
         NamedApplication app;
         ApplicationStateMachine asm;
-        
+
         NamedApplication oldAppFromNewPid = _appFromPid.get(newPid);
         NamedApplication oldAppFromNewName = _appFromName.get(newAppName);
 
@@ -1247,9 +1266,9 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
      * 
      * Uninstall the application, then re-attempt the update.
      * 
-     * @param pid The PID of the application.
+     * @param pid          The PID of the application.
      * @param newAppConfig The new configuration for the application.
-     * @param appFromPid The application already present for the PID.
+     * @param appFromPid   The application already present for the PID.
      */
     private void processUpdateWithNameChange(String pid, ApplicationConfig newAppConfig, NamedApplication appFromPid) {
         String oldAppName = appFromPid.getAppName();
@@ -1290,12 +1309,12 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
     private void processAddWithNameConflict(String pid, ApplicationConfig newAppConfig, NamedApplication appFromName) {
         String newAppName = newAppConfig.getName();
         ApplicationTypeSupport typeSupport = _appTypeSupport.get(newAppConfig.getType());
-        ApplicationHandler<?> handler = ((typeSupport != null) ? typeSupport.getHandler() : null); 
+        ApplicationHandler<?> handler = ((typeSupport != null) ? typeSupport.getHandler() : null);
         AppMessageHelper.get(handler).error("DUPLICATE_APPLICATION_NAME", newAppName);
         blockApplication(pid, newAppConfig, newAppName);
-        ApplicationStateCoordinator.updateStartingAppStatus(pid, ApplicationStateCoordinator.AppStatus.DUP_APP_NAME);        
-    }    
-    
+        ApplicationStateCoordinator.updateStartingAppStatus(pid, ApplicationStateCoordinator.AppStatus.DUP_APP_NAME);
+    }
+
     private void processUpdateWithNameConflict(String pid, ApplicationConfig newAppConfig,
                                                NamedApplication appFromPid, NamedApplication appFromName) {
         String newAppName = newAppConfig.getName();
@@ -1317,6 +1336,7 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
                         episode.dropReference();
                     }
                 }
+
                 @Override
                 public void failedCompletion(Future<Boolean> future, Throwable t) {
                     episode.dropReference();
@@ -1688,8 +1708,9 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
             startingFuture.onCompletion(new CompletionListener<Boolean>() {
                 @Override
                 public void successfulCompletion(Future<Boolean> future, Boolean result) {
-                    if (TraceComponent.isAnyTracingEnabled() && _tc.isEventEnabled())
+                    if (TraceComponent.isAnyTracingEnabled() && _tc.isEventEnabled()) {
                         Tr.event(_tc, "successfulCompletion: startingFuture, awaiting " + startedFuture);
+                    }
                 }
 
                 @Override
@@ -1705,8 +1726,9 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
             installCalledFuture.onCompletion(new CompletionListener<Boolean>() {
                 @Override
                 public void successfulCompletion(Future<Boolean> future, Boolean result) {
-                    if (TraceComponent.isAnyTracingEnabled() && _tc.isEventEnabled())
+                    if (TraceComponent.isAnyTracingEnabled() && _tc.isEventEnabled()) {
                         Tr.event(_tc, "successfulCompletion: installCalledFuture, awaiting " + startedFuture);
+                    }
                 }
 
                 @Override
@@ -2051,8 +2073,9 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
 
     public void unblockAppStartDependencies(String appPid) {
         List<ApplicationDependency> deps = _startAfterDependencies.get(appPid);
-        if (deps == null)
+        if (deps == null) {
             return;
+        }
         for (ApplicationDependency dep : deps) {
             dep.setResult(true);
         }
@@ -2117,4 +2140,19 @@ public class ApplicationConfigurator implements ManagedServiceFactory, Introspec
             _restoreMessages.add(message);
         }
     }
+
+    // gjd hack begin
+    /**
+     * privileged access to read system properties
+     *
+     */
+    private static final String getSystemProperty(final String propName) {
+        return AccessController.doPrivileged(new PrivilegedAction<String>() {
+            @Override
+            public String run() {
+                return System.getProperty(propName);
+            }
+        });
+    }
+    // gjd hack end
 }

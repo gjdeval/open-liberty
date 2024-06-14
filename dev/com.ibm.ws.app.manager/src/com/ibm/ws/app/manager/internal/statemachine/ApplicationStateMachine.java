@@ -48,9 +48,10 @@ public abstract class ApplicationStateMachine {
     public static ApplicationStateMachine newInstance(BundleContext ctx, WsLocationAdmin locAdmin, FutureMonitor futureMonitor,
                                                       ArtifactContainerFactory artifactFactory, AdaptableModuleFactory moduleFactory,
                                                       ExecutorService executorService, ScheduledExecutorService scheduledExecutor,
+                                                      ExecutorService appStartPolicyExecutor,
                                                       ASMHelper asmHelper, ApplicationMonitor appMonitor,
                                                       ApplicationConfigurator configurator) {
-        return new ApplicationStateMachineImpl(ctx, locAdmin, futureMonitor, artifactFactory, moduleFactory, executorService, scheduledExecutor, asmHelper, appMonitor, configurator);
+        return new ApplicationStateMachineImpl(ctx, locAdmin, futureMonitor, artifactFactory, moduleFactory, executorService, scheduledExecutor, appStartPolicyExecutor, asmHelper, appMonitor, configurator);
     }
 
     public abstract Future<Boolean> start();
